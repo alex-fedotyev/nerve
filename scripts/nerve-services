@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""nerve-services: thin shim over ``nerve.services.main``.
+
+When the package is pip-installed (the normal Docker setup), the
+``nerve-services`` console script declared in ``pyproject.toml`` is
+on PATH and this file is unused. It exists so the same command works
+in a fresh source-tree checkout where ``pip install -e .`` has not
+been run yet (handy for quick local hacking and for CI smoke tests).
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+_REPO_ROOT = _HERE.parent
+if (_REPO_ROOT / "nerve" / "services.py").exists():
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from nerve.services import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())

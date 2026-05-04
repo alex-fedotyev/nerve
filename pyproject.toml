@@ -33,6 +33,7 @@ dependencies = [
 
 [project.scripts]
 nerve = "nerve.cli:main"
+nerve-services = "nerve.services:main"
 
 [build-system]
 requires = ["hatchling"]
