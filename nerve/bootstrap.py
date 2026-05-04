@@ -1905,7 +1905,7 @@ def _build_docker_compose(
     projects_path: str = "~/projects",
     extra_mounts: list[str] | None = None,
     docker_mcp: bool = True,
-    docker_mcp_image: str = "mcp/docker:latest",
+    docker_mcp_image: str = "supercorp/supergateway:3.4.3-uvx",
     docker_mcp_internal_port: int = 8811,
     docker_mcp_host_port: int = 8902,
 ) -> str:
@@ -1922,8 +1922,11 @@ def _build_docker_compose(
         docker_mcp: When True, include the docker-mcp sidecar service so
             the agent can launch sibling containers (Grafana, HyperDX,
             Playwright) without mounting the docker socket itself.
-        docker_mcp_image: Container image for the sidecar. Defaults to
-            Docker's MCP gateway image.
+        docker_mcp_image: Container image for the sidecar. Default is
+            ``supercorp/supergateway:3.4.3-uvx`` which wraps the
+            stdio-only ``mcp-server-docker`` (ckreiling) and exposes it
+            as Streamable HTTP. ``mcp/docker`` is a different beast (a
+            multi-MCP gateway) and does not expose Docker control verbs.
         docker_mcp_internal_port: Port the sidecar listens on inside the
             compose network. Reachable as ``http://docker-mcp:<port>``.
         docker_mcp_host_port: Loopback-only host publish for ad-hoc
@@ -2000,12 +2003,29 @@ def _build_docker_compose(
         # docker-mcp tool resolves on the host daemon. The MCP transport
         # is published on 127.0.0.1 only so docker control is not exposed
         # outside the developer's machine.
+        #
+        # Image is supergateway-with-uvx, which wraps the stdio-only
+        # ``mcp-server-docker`` (ckreiling) and re-exposes it as
+        # Streamable HTTP at /mcp on the chosen port. This is the
+        # combination that actually exposes the Docker daemon as MCP
+        # tools; ``mcp/docker`` (the gateway image) is a multi-MCP
+        # proxy and does not.
         nerve_block += "\n    depends_on:\n      - docker-mcp"
         sidecar = f"""
 
   docker-mcp:
     image: {docker_mcp_image}
     restart: unless-stopped
+    # List form so the inner ``uvx mcp-server-docker`` stays a single
+    # arg to ``--stdio``. Folded string form sends the quotes as
+    # literal characters and breaks tokenisation in the entrypoint.
+    command:
+      - "--stdio"
+      - "uvx mcp-server-docker"
+      - "--outputTransport"
+      - "streamableHttp"
+      - "--port"
+      - "{docker_mcp_internal_port}"
     ports:
       - "127.0.0.1:{docker_mcp_host_port}:{docker_mcp_internal_port}"
     volumes:
@@ -2013,8 +2033,14 @@ def _build_docker_compose(
       - {workspace_aligned}:{workspace_aligned}
       - {projects_aligned}:{projects_aligned}
     environment:
-      MCP_TRANSPORT: http
-      MCP_PORT: "{docker_mcp_internal_port}"
+      # Persist the uvx package cache across restarts so we don't
+      # re-download mcp-server-docker every boot.
+      UV_CACHE_DIR: /var/cache/uv
+    # ``exec`` is required because Docker mounts tmpfs with ``noexec``
+    # by default; uvx runs the cached ``mcp-server-docker`` binary
+    # from this dir.
+    tmpfs:
+      - /var/cache/uv:exec,size=128m
 """
     else:
         sidecar = ""
