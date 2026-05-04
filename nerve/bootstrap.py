@@ -1847,6 +1847,17 @@ RUN GOG_VERSION=0.11.0 \\
     && curl -fsSL "https://github.com/steipete/gogcli/releases/download/v${GOG_VERSION}/gogcli_${GOG_VERSION}_linux_${ARCH}.tar.gz" \\
     | tar xz -C /usr/local/bin gog
 
+# Install Docker CLI (client only) for diagnostics. Container management
+# happens via the docker-mcp sidecar, which mounts the host socket.
+RUN install -m 0755 -d /etc/apt/keyrings \\
+    && curl -fsSL https://download.docker.com/linux/debian/gpg \\
+       | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \\
+    && chmod a+r /etc/apt/keyrings/docker.gpg \\
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" \\
+       > /etc/apt/sources.list.d/docker.list \\
+    && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \\
+    && rm -rf /var/lib/apt/lists/*
+
 RUN mkdir -p /root/.nerve /root/nerve-workspace
 
 ENV NERVE_DOCKER=1
@@ -1870,21 +1881,67 @@ RUN chmod +x /docker-entrypoint.sh
 ENTRYPOINT ["/docker-entrypoint.sh"]
 """
 
+def _host_aligned_path(path: str) -> str:
+    """Return a YAML-safe representation of ``path`` that resolves to
+    the same absolute path on the host and inside the container.
+
+    Compose substitutes ``${HOME}`` from the user's shell env at
+    runtime, so a ``~/foo`` workspace becomes ``${HOME}/foo`` and
+    expands to the host's ``$HOME``. Absolute paths are returned
+    untouched. Path alignment is what lets the docker-mcp sidecar pass
+    the same path to the host daemon when launching siblings.
+    """
+    if not path:
+        return path
+    if path.startswith("~/"):
+        return "${HOME}/" + path[2:]
+    if path == "~":
+        return "${HOME}"
+    return path
+
+
 def _build_docker_compose(
     workspace_path: str = "~/nerve-workspace",
+    projects_path: str = "~/projects",
     extra_mounts: list[str] | None = None,
+    docker_mcp: bool = True,
+    docker_mcp_image: str = "mcp/docker:latest",
+    docker_mcp_internal_port: int = 8811,
+    docker_mcp_host_port: int = 8902,
 ) -> str:
     """Build docker-compose.yml content with host bind-mounts.
 
     Args:
-        workspace_path: Host path for the workspace (e.g. ~/nerve-workspace).
-        extra_mounts: Additional host:container mount pairs (e.g. ["~/code:/code"]).
+        workspace_path: Host path for the workspace (default ~/nerve-workspace).
+        projects_path: Host path for the projects directory containing
+            git checkouts and worktrees (default ~/projects). Mounted
+            with path alignment so the docker-mcp sidecar can pass the
+            same paths to the host daemon when starting sibling
+            containers.
+        extra_mounts: Additional host:container mount pairs.
+        docker_mcp: When True, include the docker-mcp sidecar service so
+            the agent can launch sibling containers (Grafana, HyperDX,
+            Playwright) without mounting the docker socket itself.
+        docker_mcp_image: Container image for the sidecar. Defaults to
+            Docker's MCP gateway image.
+        docker_mcp_internal_port: Port the sidecar listens on inside the
+            compose network. Reachable as ``http://docker-mcp:<port>``.
+        docker_mcp_host_port: Loopback-only host publish for ad-hoc
+            inspection from the Mac. Bound to 127.0.0.1.
     """
-    # Required mounts (always present)
+    # Host-aligned paths: same absolute string inside and outside the
+    # container, so the docker-mcp sidecar can mount them into siblings
+    # using paths the host daemon recognises.
+    workspace_aligned = _host_aligned_path(workspace_path)
+    projects_aligned = _host_aligned_path(projects_path)
+
+    # Required mounts. ~/.nerve stays at /root/.nerve because it is
+    # agent-only state and never passed through to siblings.
     volumes = [
         ".:/nerve",
         "~/.nerve:/root/.nerve",
-        f"{workspace_path}:/root/nerve-workspace",
+        f"{workspace_aligned}:{workspace_aligned}",
+        f"{projects_aligned}:{projects_aligned}",
     ]
 
     # Optional auth mounts — only include if the host directory exists.
@@ -1905,14 +1962,29 @@ def _build_docker_compose(
     if extra_mounts:
         volumes.extend(extra_mounts)
 
-    # Build YAML by hand to keep formatting clean
     vol_lines = "\n".join(f"      - {v}" for v in volumes)
 
-    return f"""services:
-  nerve:
+    # In-agent service ports. Sibling-zone ranges (grafana, hyperdx-*)
+    # are published by the host daemon at sibling-launch time, not by
+    # the agent. Keep this list in sync with nerve.services.KINDS.
+    in_agent_port_ranges = [
+        ("docs",      3000, 3019),
+        ("vite",      5173, 5189),
+        ("storybook", 6006, 6019),
+    ]
+    port_lines = ['      - "8900:8900"']
+    for label, lo, hi in in_agent_port_ranges:
+        port_lines.append(f'      - "{lo}-{hi}:{lo}-{hi}"  # {label}')
+
+    nerve_block = f"""  nerve:
     build: .
     ports:
-      - "8900:8900"
+{chr(10).join(port_lines)}
+    environment:
+      # Path alignment: the entrypoint creates /root/* symlinks pointing
+      # at HOST_HOME so legacy paths still resolve, and any path passed
+      # to the docker-mcp sidecar resolves identically on the host.
+      HOST_HOME: ${{HOME}}
     volumes:
 {vol_lines}
     restart: unless-stopped
@@ -1920,8 +1992,36 @@ def _build_docker_compose(
     tty: true
     env_file:
       - path: .env
-        required: false
+        required: false"""
+
+    if docker_mcp:
+        # The sidecar mounts the host docker socket plus the same host-
+        # aligned paths the agent uses. Anything the agent passes to a
+        # docker-mcp tool resolves on the host daemon. The MCP transport
+        # is published on 127.0.0.1 only so docker control is not exposed
+        # outside the developer's machine.
+        nerve_block += "\n    depends_on:\n      - docker-mcp"
+        sidecar = f"""
+
+  docker-mcp:
+    image: {docker_mcp_image}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:{docker_mcp_host_port}:{docker_mcp_internal_port}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - {workspace_aligned}:{workspace_aligned}
+      - {projects_aligned}:{projects_aligned}
+    environment:
+      MCP_TRANSPORT: http
+      MCP_PORT: "{docker_mcp_internal_port}"
 """
+    else:
+        sidecar = ""
+
+    return f"""services:
+{nerve_block}
+{sidecar}"""
 
 _DOCKER_ENTRYPOINT_TEMPLATE = """#!/bin/bash
 set -e
@@ -1935,6 +2035,33 @@ pip install -e . --quiet 2>/dev/null
 if [ ! -d "web/dist" ]; then
     echo "Building web UI..."
     cd web && npm ci --quiet && npm run build && cd ..
+fi
+
+# --- Path alignment ---
+# HOST_HOME comes from compose (set to ${HOME} on the host). For each
+# host-aligned mount point, drop a symlink at the legacy /root/* path
+# so anything that hard-codes /root/nerve-workspace or /root/projects
+# keeps working and resolves to the same files the docker-mcp sidecar
+# sees. Idempotent: if the symlink already points where we want, skip.
+if [ -n "${HOST_HOME:-}" ]; then
+    for _name in nerve-workspace projects; do
+        _src="$HOST_HOME/$_name"
+        _dst="/root/$_name"
+        if [ ! -d "$_src" ]; then
+            continue
+        fi
+        if [ -L "$_dst" ]; then
+            # Already a symlink; trust it.
+            continue
+        fi
+        if [ -d "$_dst" ] && [ -z "$(ls -A "$_dst" 2>/dev/null)" ]; then
+            # Empty leftover dir from the Dockerfile mkdir or a prior
+            # bind mount that no longer exists. Replace with the symlink.
+            rmdir "$_dst" && ln -s "$_src" "$_dst"
+        elif [ ! -e "$_dst" ]; then
+            ln -s "$_src" "$_dst"
+        fi
+    done
 fi
 
 # --- Credential resolution (priority waterfall) ---

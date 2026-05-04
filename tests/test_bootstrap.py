@@ -467,7 +467,14 @@ class TestDockerTemplateIntegrity:
         assert "nerve" in parsed["services"]
 
     def test_compose_bind_mounts(self) -> None:
-        """Compose should use host bind-mounts, not named volumes."""
+        """Compose should use host bind-mounts, not named volumes.
+
+        Workspace and projects are mounted at host-aligned paths
+        (``${HOME}/...:${HOME}/...``) so the docker-mcp sidecar can
+        pass them through to siblings without translation. The
+        legacy ``/root/nerve-workspace`` path is restored as a symlink
+        by the entrypoint, not by a separate bind mount.
+        """
         # Mock all optional dirs as existing so they appear in output
         with patch("nerve.bootstrap.os.path.isdir", return_value=True), \
              patch("nerve.bootstrap.os.path.expanduser", side_effect=lambda p: p):
@@ -478,11 +485,17 @@ class TestDockerTemplateIntegrity:
         assert "~/.nerve:/root/.nerve" in volumes
         assert "~/.config/gh:/root/.config/gh" in volumes
         assert "~/.config/gog:/root/.config/gog" in volumes
-        assert "~/my-workspace:/root/nerve-workspace" in volumes
+        # Workspace and projects are host-aligned so paths resolve
+        # identically inside and outside the container.
+        assert "${HOME}/my-workspace:${HOME}/my-workspace" in volumes
+        assert "${HOME}/projects:${HOME}/projects" in volumes
         # ~/.claude is NOT mounted (macOS Keychain, not filesystem)
         assert "~/.claude:/root/.claude" not in volumes
         # No named volumes section
         assert "volumes" not in parsed or parsed.get("volumes") is None
+        # HOST_HOME env is required for the entrypoint symlink step.
+        env = parsed["services"]["nerve"].get("environment") or {}
+        assert env.get("HOST_HOME") == "${HOME}"
 
     def test_compose_skips_missing_auth_dirs(self) -> None:
         """Optional auth mounts should be excluded when host dirs don't exist."""
@@ -491,13 +504,48 @@ class TestDockerTemplateIntegrity:
             content = _build_docker_compose(workspace_path="~/ws")
         parsed = yaml.safe_load(content)
         volumes = parsed["services"]["nerve"]["volumes"]
-        # Required mounts still present
+        # Required mounts still present (host-aligned).
         assert ".:/nerve" in volumes
         assert "~/.nerve:/root/.nerve" in volumes
-        assert "~/ws:/root/nerve-workspace" in volumes
+        assert "${HOME}/ws:${HOME}/ws" in volumes
+        assert "${HOME}/projects:${HOME}/projects" in volumes
         # Optional auth mounts absent
         assert "~/.config/gh:/root/.config/gh" not in volumes
         assert "~/.config/gog:/root/.config/gog" not in volumes
+
+    def test_compose_includes_in_agent_port_ranges(self) -> None:
+        """Compose should publish the docs/vite/storybook in-agent ranges."""
+        content = _build_docker_compose()
+        parsed = yaml.safe_load(content)
+        ports = parsed["services"]["nerve"]["ports"]
+        # 8900 is the Nerve gateway; the rest are for skill-launched
+        # dev servers. Compose normalises range mappings as strings.
+        assert "8900:8900" in ports
+        assert "3000-3019:3000-3019" in ports
+        assert "5173-5189:5173-5189" in ports
+        assert "6006-6019:6006-6019" in ports
+
+    def test_compose_includes_docker_mcp_sidecar(self) -> None:
+        """Compose should include a docker-mcp service when enabled."""
+        content = _build_docker_compose()
+        parsed = yaml.safe_load(content)
+        assert "docker-mcp" in parsed["services"]
+        sidecar = parsed["services"]["docker-mcp"]
+        assert "/var/run/docker.sock:/var/run/docker.sock" in sidecar["volumes"]
+        # Sibling-launch paths must be host-aligned in the sidecar too.
+        assert any(
+            ":${HOME}/" in v or v.startswith("${HOME}/")
+            for v in sidecar["volumes"]
+        )
+        # Agent depends on it so the MCP transport is up at first reload.
+        assert "docker-mcp" in parsed["services"]["nerve"].get("depends_on", [])
+
+    def test_compose_can_omit_docker_mcp(self) -> None:
+        """``docker_mcp=False`` should produce a sidecar-less compose file."""
+        content = _build_docker_compose(docker_mcp=False)
+        parsed = yaml.safe_load(content)
+        assert "docker-mcp" not in parsed["services"]
+        assert "depends_on" not in parsed["services"]["nerve"]
 
     def test_compose_extra_mounts(self) -> None:
         """Extra mounts should appear in the volumes list."""

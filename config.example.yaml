@@ -73,3 +73,26 @@ cron:
 #   host: https://cloud.langfuse.com
 #   # redact_patterns:           # optional — strip these regexes from spans
 #   #   - "sk-ant-[A-Za-z0-9_\\-]{20,}"
+
+# External MCP servers
+# After editing, run mcp_reload (or restart Nerve) to pick up changes.
+# Secrets (Bearer tokens, API keys) go in config.local.yaml under the
+# same mcp_servers.<name>.<...> path so deep-merge overlays them on top.
+# mcp_servers:
+#
+#   # docker-mcp sidecar: lets the agent spawn sibling containers
+#   # (Grafana, HyperDX stack, Playwright sidecars) without mounting the
+#   # docker socket into the agent itself. The compose file pairs the
+#   # nerve service with a docker-mcp service that holds the socket and
+#   # serves MCP over HTTP on the internal docker network.
+#   #
+#   # Spike status: this is wired up but the choice of upstream image
+#   # may need adjusting based on what verbs your build of mcp/docker
+#   # exposes. If `nerve_api` shows zero tools after `mcp_reload`, swap
+#   # the compose service to a community alternative (e.g.
+#   # ckreiling/mcp-server-docker fronted by supergateway) and update
+#   # the URL below to match.
+#   docker:
+#     type: http
+#     url: http://docker-mcp:8811/mcp
+#     enabled: true
