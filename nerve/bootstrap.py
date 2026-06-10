@@ -2239,6 +2239,18 @@ if [ -z "$GH_TOKEN" ] && [ -f config.local.yaml ]; then
     [ -n "$_gh" ] && export GH_TOKEN="$_gh"
 fi
 
+# Optional operator hook: a command used to spawn a helper session.
+# Nerve itself does not read NERVE_DRAFT_SPAWN_CMD; it is exported here
+# for operator automation that runs inside the container (for example a
+# scheduled job that prepares a draft on its own branch). When the key
+# is present in config.local.yaml, expose it so the automation finds it
+# already set rather than having to export it on every run. A
+# deployment that does not set the key is unaffected.
+if [ -z "$NERVE_DRAFT_SPAWN_CMD" ] && [ -f config.local.yaml ]; then
+    _spawn=$(python3 -c "import yaml; print(yaml.safe_load(open('config.local.yaml')).get('nerve_draft_spawn_cmd',''))" 2>/dev/null)
+    [ -n "$_spawn" ] && export NERVE_DRAFT_SPAWN_CMD="$_spawn"
+fi
+
 # Ensure the persisted Claude Code state dir exists and is writable
 # before any tool that touches /root/.claude runs. The bind mount in
 # docker-compose creates it as a host-owned empty dir on first boot;

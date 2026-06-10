@@ -530,6 +530,18 @@ class TestDockerTemplateIntegrity:
         assert "ANTHROPIC_API_KEY" in _DOCKER_ENTRYPOINT_TEMPLATE
         assert "anthropic_api_key" in _DOCKER_ENTRYPOINT_TEMPLATE
 
+    def test_entrypoint_exports_draft_spawn_cmd_when_configured(self) -> None:
+        """Entrypoint should export NERVE_DRAFT_SPAWN_CMD from config when set.
+
+        Optional operator hook: when config.local.yaml sets
+        nerve_draft_spawn_cmd, the entrypoint exposes it as
+        NERVE_DRAFT_SPAWN_CMD so operator automation finds it already
+        set. A deployment without the key is unaffected (guarded on a
+        non-empty value).
+        """
+        assert "NERVE_DRAFT_SPAWN_CMD" in _DOCKER_ENTRYPOINT_TEMPLATE
+        assert "nerve_draft_spawn_cmd" in _DOCKER_ENTRYPOINT_TEMPLATE
+
     def test_dockerignore_not_empty(self) -> None:
         assert len(_DOCKERIGNORE_TEMPLATE.strip()) > 50
 
