@@ -12,8 +12,7 @@ to register the embedding profile, so memU saw no embedding provider
 and stored every new memory with a NULL vector. The result: vector
 search at recall time was disabled for those rows, and queries that
 should have hit recent memories returned "No relevant memories
-found." See ``notes/lessons/2026-05-09-memu-embeddings-not-wired.md``
-for the full RCA.
+found."
 
 The companion change in this PR teaches ``memu_bridge`` to read
 ``MEMU_EMBEDDING_BASE_URL`` first; this script catches up the rows
@@ -76,6 +75,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import sqlite3
 import sys
@@ -131,6 +131,18 @@ def _fetch_pending(
     return list(cur.execute(sql))
 
 
+def _l2_normalize(vec: list[float]) -> list[float]:
+    """Scale a vector to unit L2 norm.
+
+    memU's live embedding path stores unit-norm vectors and its fast
+    cosine search assumes them. Raw endpoint output (Ollama / TEI) is not
+    guaranteed normalized, so backfilled rows must match or recall ranks
+    them inconsistently against live-written rows.
+    """
+    norm = math.sqrt(sum(x * x for x in vec))
+    return [x / norm for x in vec] if norm else vec
+
+
 def _embed_batch(
     client: httpx.Client,
     base_url: str,
@@ -138,7 +150,7 @@ def _embed_batch(
     model: str,
     texts: list[str],
 ) -> list[list[float]]:
-    """POST a batch to ``/embeddings`` and return a list of vectors.
+    """POST a batch to ``/embeddings`` and return a list of unit-norm vectors.
 
     Raises on non-2xx HTTP status. The caller controls retry policy.
     """
@@ -157,7 +169,7 @@ def _embed_batch(
         )
     # Order is documented to match input order; sort by index defensively.
     by_index = sorted(data, key=lambda d: d.get("index", 0))
-    return [d["embedding"] for d in by_index]
+    return [_l2_normalize(d["embedding"]) for d in by_index]
 
 
 def _backfill_table(
