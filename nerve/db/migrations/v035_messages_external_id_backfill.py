@@ -1,4 +1,4 @@
-"""V33: Ensure messages.external_id on DBs that skipped the v028 codex migration.
+"""V35: Ensure messages.external_id on DBs that skipped the v028 codex migration.
 
 The ``external_id`` column + partial unique index were introduced by
 ``v028_codex_message_external_id``. On installs that had already applied an
@@ -32,4 +32,4 @@ async def up(db: aiosqlite.Connection) -> None:
            ON messages(session_id, external_id)
            WHERE external_id IS NOT NULL"""
     )
-    logger.info("v033: ensured messages.external_id column + partial unique index")
+    logger.info("v035: ensured messages.external_id column + partial unique index")

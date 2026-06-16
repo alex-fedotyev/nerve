@@ -41,6 +41,17 @@ def _parse_log_ts(value: str) -> datetime | None:
 
 
 async def up(db: aiosqlite.Connection) -> None:
+    # Self-heal the column v033 adds. On a DB upgraded from an earlier local
+    # build, schema_version can be 33 from a different v033 (a local
+    # messages.external_id backfill, renumbered to v035), so the runner skips
+    # v033_cron_log_session and this backfill would otherwise crash on a
+    # missing column. Ensure it exists here so the backfill is safe regardless
+    # of whether v033 ran.
+    cursor = await db.execute("PRAGMA table_info(cron_logs)")
+    cols = {row[1] for row in await cursor.fetchall()}
+    if "session_id" not in cols:
+        await db.execute("ALTER TABLE cron_logs ADD COLUMN session_id TEXT")
+
     # Index cron sessions: job -> persistent id / [(run_time, session_id)]
     persistent: dict[str, str] = {}
     runs: dict[str, list[tuple[datetime, str]]] = {}
